@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Auto-Sub Config</title>
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; background-color: #121212; color: #e0e0e0; display: flex; justify-content: center; padding: 20px; }
+        .container { background-color: #1e1e1e; padding: 30px; border-radius: 12px; width: 500px; box-shadow: 0 4px 20px rgba(0,0,0,0.6); }
+        h1 { margin-bottom: 20px; font-size: 24px; color: #fff; text-align: center; }
+        .section { margin-bottom: 25px; padding-bottom: 15px; border-bottom: 1px solid #333; }
+        label { display: block; margin-top: 10px; font-size: 13px; color: #aaa; font-weight: 600; }
+        input, select { width: 100%; padding: 10px; margin-top: 5px; background: #2c2c2c; color: white; border: 1px solid #444; border-radius: 6px; box-sizing: border-box; }
+        .btn-group { display: flex; gap: 10px; margin-top: 20px; }
+        button { flex: 1; padding: 12px; border: none; border-radius: 6px; font-size: 15px; cursor: pointer; font-weight: bold; transition: 0.2s; }
+        .btn-install { background-color: #6a5acd; color: white; }
+        .btn-install:hover { background-color: #7b68ee; }
+        .btn-copy { background-color: #333; color: #ddd; }
+        .btn-copy:hover { background-color: #444; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Auto-Sub Config</h1>
+        <div class="section">
+            <label>Real Language</label>
+            <select id="realLang">
+                <option value="eng">English</option>
+                <option value="spa">Spanish</option>
+                <option value="fre">French</option>
+            </select>
+            <label>Spoof Language (Must match Stremio Settings)</label>
+            <select id="spoofLang">
+                <option value="mri">Maori (Recommended)</option>
+            </select>
+        </div>
+
+        <div class="section">
+            <label>Source 1: OpenSubtitles v3</label>
+            <input type="text" id="url_os" value="https://opensubtitles-v3.strem.io">
+
+            <label>Source 2: SubDL API Key</label>
+            <input type="text" id="key_subdl" placeholder="Paste API Key here...">
+        </div>
+
+        <div class="btn-group">
+            <button class="btn-copy" onclick="copyLink()">Copy Link</button>
+            <button class="btn-install" onclick="install()">Install</button>
+        </div>
+    </div>
+
+    <script>
+        function getManifestUrl(protocol) {
+            const real = document.getElementById('realLang').value;
+            const spoof = document.getElementById('spoofLang').value;
+            
+            // 1. OS URL Clean-up
+            let osUrl = document.getElementById('url_os').value.trim();
+            if (osUrl.endsWith('/manifest.json')) osUrl = osUrl.replace('/manifest.json', '');
+            if (osUrl.endsWith('/')) osUrl = osUrl.slice(0, -1);
+
+            // 2. SubDL URL Logic
+            const subdlKey = document.getElementById('key_subdl').value.trim();
+            let subdlUrl = "";
+            if (subdlKey.length > 5) {
+                if (subdlKey.startsWith('http')) {
+                    // If user pasted full link by mistake, fix it
+                    subdlUrl = subdlKey;
+                    if (subdlUrl.endsWith('/manifest.json')) subdlUrl = subdlUrl.replace('/manifest.json', '');
+                } else {
+                    // Construct correct URL
+                    subdlUrl = `https://subdl.strem.top/conf/${subdlKey}`;
+                }
+            }
+
+            const sources = [osUrl, subdlUrl].filter(u => u.length > 0).map(encodeURIComponent);
+            const configString = `${real}|${spoof}|${sources.join('|')}`;
+            // IMPORTANT: use protocol passed in argument
+            return `${protocol}://${window.location.host}/${configString}/manifest.json`;
+        }
+
+        function install() { 
+            // This opens the Stremio app directly
+            window.location.href = getManifestUrl('stremio'); 
+        }
+
+        function copyLink() {
+            // This copies the HTTP link for manual pasting
+            navigator.clipboard.writeText(getManifestUrl('http')).then(() => alert("Copied!"));
+        }
+    </script>
+</body>
+</html>
