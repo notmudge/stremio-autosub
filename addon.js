@@ -5,16 +5,18 @@ const axios = require('axios');
 const app = express();
 app.use(cors());
 
-const PORT = 7000;
-// Keywords for scoring (BluRay vs WebDL etc)
+const PORT = process.env.PORT || 7000; // Updated to use Render's port if available
 const RELEASE_TAGS = ['bluray', 'brrip', 'web-dl', 'webrip', 'web', 'hdrip', 'dvdrip', 'cam', 'ts', 'tc'];
 
 app.get('/', (req, res) => {
     res.sendFile(__dirname + '/configure.html');
 });
 
+// Helper to decode config string
 function parseConfig(configStr) {
-    const parts = configStr.split('|');
+    // If the browser encoded slashes as %2F, decode them first
+    const decoded = decodeURIComponent(configStr);
+    const parts = decoded.split('|');
     return {
         realLang: parts[0] || 'eng',
         spoofLang: parts[1] || 'mri',
@@ -22,14 +24,19 @@ function parseConfig(configStr) {
     };
 }
 
-app.get('/:config/manifest.json', (req, res) => {
-    const { realLang, spoofLang, sources } = parseConfig(req.params.config);
+// ---------------------------------------------------------
+// ROUTE 1: MANIFEST (Regex Fix)
+// Matches anything that ends in /manifest.json
+// ---------------------------------------------------------
+app.get(/^\/(.+)\/manifest.json$/, (req, res) => {
+    const configStr = req.params[0]; // Captures everything before /manifest.json
+    const { realLang, spoofLang, sources } = parseConfig(configStr);
 
     res.json({
-        id: `org.community.singlebest.${realLang}`,
-        version: '4.0.0',
-        name: `Auto-Sub (Best Only)`,
-        description: `Returns ONLY the single best matching subtitle. No backup options.`,
+        id: `org.community.singlebest.ai.${realLang}`,
+        version: '4.2.0',
+        name: `Auto-Sub (Robust)`,
+        description: `Auto-plays Human match. Falls back to AI. (Fixed for Render)`,
         resources: ['subtitles'],
         types: ['movie', 'series'],
         catalogs: [],
@@ -37,9 +44,17 @@ app.get('/:config/manifest.json', (req, res) => {
     });
 });
 
-app.get(['/:config/subtitles/:type/:id/:extra.json', '/:config/subtitles/:type/:id.json'], async (req, res) => {
-    const { config, type, id, extra } = req.params;
-    const { realLang, spoofLang, sources } = parseConfig(config);
+// ---------------------------------------------------------
+// ROUTE 2: SUBTITLES (Regex Fix)
+// Matches /config/subtitles/type/id/extra.json
+// ---------------------------------------------------------
+app.get(/^\/(.+)\/subtitles\/([^/]+)\/([^/]+)(?:\/([^/]+))?\.json$/, async (req, res) => {
+    const configStr = req.params[0];
+    const type = req.params[1];
+    const id = req.params[2];
+    const extra = req.params[3]; // This might be undefined
+
+    const { realLang, spoofLang, sources } = parseConfig(configStr);
 
     // 1. Extract Metadata
     let videoHash = null;
@@ -54,16 +69,16 @@ app.get(['/:config/subtitles/:type/:id/:extra.json', '/:config/subtitles/:type/:
         }
     }
 
-    console.log(`[${id}] Fetching best match... (Hash: ${!!videoHash})`);
+    console.log(`[${id}] Fetching... (Hash: ${!!videoHash}) Sources: ${sources.length}`);
 
     try {
-        // 2. Parallel Fetch from all sources
+        // 2. Parallel Fetch
         const fetchPromises = sources.map(async (baseUrl) => {
+            if (!baseUrl.startsWith('http')) return { source: baseUrl, subs: [] }; // Safety check
             try {
                 let url = `${baseUrl}/subtitles/${type}/${id}`;
                 if (videoHash) url += `/videoHash=${videoHash}`;
                 url += `.json`;
-                // Short timeout to keep it snappy
                 const response = await axios.get(url, { timeout: 5000 });
                 return { source: baseUrl, subs: response.data.subtitles || [] };
             } catch (e) { return { source: baseUrl, subs: [] }; }
@@ -71,7 +86,6 @@ app.get(['/:config/subtitles/:type/:id/:extra.json', '/:config/subtitles/:type/:
 
         const results = await Promise.all(fetchPromises);
         
-        // 3. Merge Results
         let allSubs = [];
         results.forEach(res => {
             if (res.subs.length > 0) {
@@ -84,7 +98,7 @@ app.get(['/:config/subtitles/:type/:id/:extra.json', '/:config/subtitles/:type/:
             }
         });
 
-        // 4. Filter & Score
+        // 3. Filter & Score
         let processedSubs = [];
         const seenUrls = new Set(); 
 
@@ -92,43 +106,38 @@ app.get(['/:config/subtitles/:type/:id/:extra.json', '/:config/subtitles/:type/:
             if (seenUrls.has(sub.url)) return;
             seenUrls.add(sub.url);
 
-            // Filter for target language
             if (sub.lang && (sub.lang.startsWith(realLang) || (realLang === 'eng' && sub.lang === 'en'))) {
                 let score = 0;
                 const subText = (sub.id + " " + (sub.url || "")).toLowerCase();
+                const isAI = subText.includes('machine') || subText.includes('translated');
 
-                // A. Release Tag Matching (Critical for Sync)
+                // A. Release Tag Matching
                 RELEASE_TAGS.forEach(tag => {
                     if (videoFilename.includes(tag) && subText.includes(tag)) score += 20;
-                    else if (!videoFilename.includes(tag) && subText.includes(tag)) score -= 10;
+                    else if (!videoFilename.includes(tag) && subText.includes(tag)) score -= 5;
                 });
 
-                // B. Penalties for "Bad" Subs
-                if (subText.includes('machine') || subText.includes('translated')) score -= 50;
-                if (subText.includes('sdh') || subText.includes('impaired')) score -= 2; // Slight penalty for SDH
-                
-                // C. Boost Verified Hash Matches (OpenSubtitles)
-                if (videoHash && sub._origin === 'OS') score += 15;
+                // B. Hash Match (Best)
+                if (videoHash && sub._origin === 'OS') score += 50;
 
-                processedSubs.push({ ...sub, _score: score });
+                // C. AI Logic
+                if (isAI) score -= 10;
+
+                processedSubs.push({ ...sub, _score: score, _isAI: isAI });
             }
         });
 
-        // 5. Sort (Highest Score First)
+        // 4. Sort
         processedSubs.sort((a, b) => b._score - a._score);
 
-        // 6. RETURN ONLY THE WINNER
+        // 5. RETURN ONLY THE WINNER
         const finalSubs = [];
-        
         if (processedSubs.length > 0) {
             const winner = processedSubs[0];
-            
-            console.log(`[${id}] Winner: ${winner.id} (Score: ${winner._score})`);
-            
             finalSubs.push({
                 ...winner,
-                id: `best_${winner.id}`, // Unique ID
-                lang: spoofLang          // "mri" -> Auto-Play
+                id: `best_${winner.id}`, 
+                lang: spoofLang // Auto-Play
             });
         }
 
@@ -141,5 +150,5 @@ app.get(['/:config/subtitles/:type/:id/:extra.json', '/:config/subtitles/:type/:
 });
 
 app.listen(PORT, () => {
-    console.log(`Addon running at http://localhost:${PORT}`);
+    console.log(`Addon running on port ${PORT}`);
 });
