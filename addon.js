@@ -11,7 +11,6 @@ const PORT = process.env.PORT || 7000;
 const TYPES = {
     bluray: ['bluray', 'brrip', 'bdrip'],
     web: ['web-dl', 'webrip', 'web', 'hdrip'],
-    cam: ['cam', 'ts', 'tc', 'dvdscr']
 };
 
 app.get('/', (req, res) => {
@@ -21,23 +20,25 @@ app.get('/', (req, res) => {
 function parseConfig(configStr) {
     const decoded = decodeURIComponent(configStr);
     const parts = decoded.split('|');
+    let sources = parts.slice(2).map(u => decodeURIComponent(u));
+    if (sources.length === 0) sources = ["https://opensubtitles-v3.strem.io"];
+
     return {
         realLang: parts[0] || 'eng',
         spoofLang: parts[1] || 'mri',
-        sources: parts.slice(2).map(u => decodeURIComponent(u))
+        sources: sources
     };
 }
 
-// 1. Manifest
 app.get(/^\/(.+)\/manifest.json$/, (req, res) => {
     const configStr = req.params[0];
     const { realLang } = parseConfig(configStr);
 
     res.json({
-        id: `org.community.autosub.strict.${realLang}`,
-        version: '4.3.0',
-        name: `Auto-Sub (Strict Sync)`,
-        description: `Strictly matches BluRay to BluRay, Web to Web. Prevents "Too Fast" issues.`,
+        id: `org.community.autosub.top3.${realLang}`,
+        version: '4.5.0',
+        name: `Auto-Sub (Top 3)`,
+        description: `Auto-plays the best match. Shows 2 backups. Strict Sync.`,
         resources: ['subtitles'],
         types: ['movie', 'series'],
         catalogs: [],
@@ -45,7 +46,6 @@ app.get(/^\/(.+)\/manifest.json$/, (req, res) => {
     });
 });
 
-// 2. Subtitles
 app.get(/^\/(.+)\/subtitles\/([^/]+)\/([^/]+)(?:\/([^/]+))?\.json$/, async (req, res) => {
     const configStr = req.params[0];
     const type = req.params[1];
@@ -88,10 +88,7 @@ app.get(/^\/(.+)\/subtitles\/([^/]+)\/([^/]+)(?:\/([^/]+))?\.json$/, async (req,
         results.forEach(res => {
             if (res.subs.length > 0) {
                 res.subs.forEach(s => {
-                    let sourceName = "UNK";
-                    if(res.source.includes("opensub")) sourceName = "OS";
-                    if(res.source.includes("subdl")) sourceName = "SDL";
-                    allSubs.push({ ...s, _origin: sourceName });
+                    allSubs.push({ ...s, _origin: "OS" });
                 });
             }
         });
@@ -99,7 +96,6 @@ app.get(/^\/(.+)\/subtitles\/([^/]+)\/([^/]+)(?:\/([^/]+))?\.json$/, async (req,
         // 3. IDENTIFY VIDEO TYPE
         let isBluRay = TYPES.bluray.some(t => videoFilename.includes(t));
         let isWeb = TYPES.web.some(t => videoFilename.includes(t));
-        let isCam = TYPES.cam.some(t => videoFilename.includes(t));
 
         // 4. FILTER & SCORE
         let processedSubs = [];
@@ -115,22 +111,19 @@ app.get(/^\/(.+)\/subtitles\/([^/]+)\/([^/]+)(?:\/([^/]+))?\.json$/, async (req,
                 const isAI = subText.includes('machine') || subText.includes('translated');
 
                 // A. STRICT TYPE MATCHING
-                // If we KNOW the video type, we punish mismatches heavily.
                 if (isBluRay) {
-                    if (TYPES.bluray.some(t => subText.includes(t))) score += 50; // Perfect match
-                    else if (TYPES.web.some(t => subText.includes(t))) score -= 100; // WRONG TYPE (Fast/Slow issue)
+                    if (TYPES.bluray.some(t => subText.includes(t))) score += 50; 
+                    else if (TYPES.web.some(t => subText.includes(t))) score -= 100;
                 } else if (isWeb) {
-                    if (TYPES.web.some(t => subText.includes(t))) score += 50; // Perfect match
-                    else if (TYPES.bluray.some(t => subText.includes(t))) score -= 100; // WRONG TYPE
+                    if (TYPES.web.some(t => subText.includes(t))) score += 50; 
+                    else if (TYPES.bluray.some(t => subText.includes(t))) score -= 100; 
                 }
 
-                // B. Hash Match (Always wins)
-                if (videoHash && sub._origin === 'OS') score += 200;
+                // B. Hash Match (Priority)
+                if (videoHash) score += 200;
 
-                // C. FPS Check (Advanced)
-                // If filename has "23.976" and sub has "23.976", boost it.
+                // C. FPS Check
                 if (videoFilename.includes('23.976') && subText.includes('23.976')) score += 20;
-                if (videoFilename.includes('24.000') && subText.includes('24.000')) score += 20;
 
                 // D. AI Logic
                 if (isAI) score -= 10;
@@ -142,23 +135,26 @@ app.get(/^\/(.+)\/subtitles\/([^/]+)\/([^/]+)(?:\/([^/]+))?\.json$/, async (req,
         // 5. Sort (Highest Score First)
         processedSubs.sort((a, b) => b._score - a._score);
 
-        // 6. RETURN WINNER
-        const finalSubs = [];
-        if (processedSubs.length > 0) {
-            const winner = processedSubs[0];
-
-            // SAFETY CHECK: If the winner has a very low score (meaning it's likely a mismatch),
-            // we might want to return NOTHING rather than a bad subtitle.
-            // But usually, users prefer *something* over *nothing*.
+        // 6. RETURN TOP 3 SURVIVORS
+        const finalSubs = processedSubs.slice(0, 3).map((sub, index) => {
+            // Index 0 = "mri" (Auto Play)
+            // Index 1 = "mri 2" (Backup)
+            // Index 2 = "mri 3" (Backup)
             
-            console.log(`[${id}] Winner: ${winner.id} (Score: ${winner._score})`);
+            let langLabel = spoofLang;
+            if (index > 0) {
+                // We add a number so user can distinguish them in the list
+                // Note: Stremio might group them if lang code is identical, so we try to differentiate ID
+                langLabel = `${spoofLang} ${index + 1}`; 
+            }
 
-            finalSubs.push({
-                ...winner,
-                id: `best_${winner.id}`, 
-                lang: spoofLang 
-            });
-        }
+            return {
+                ...sub,
+                id: `best_${index}_${sub.id}`, 
+                lang: spoofLang, // Keep code same for grouping, or vary it if you want distinct rows
+                // We will rely on Stremio order. Best score is first.
+            };
+        });
 
         res.json({ subtitles: finalSubs });
 
