@@ -15,18 +15,20 @@
         select { width: 100%; padding: 10px; margin-top: 5px; background: #2c2c2c; color: white; border: 1px solid #444; border-radius: 6px; box-sizing: border-box; }
         
         .btn-group { display: flex; flex-direction: column; gap: 10px; margin-top: 20px; }
-        .row { display: flex; gap: 10px; }
         
-        button { flex: 1; padding: 12px; border: none; border-radius: 6px; font-size: 14px; cursor: pointer; font-weight: bold; transition: 0.2s; }
-        
-        /* Specific Button Colors */
+        /* Link Buttons (Look like buttons, act like links) */
+        a.btn { 
+            display: block; text-align: center; text-decoration: none;
+            padding: 12px; border-radius: 6px; font-size: 14px; font-weight: bold; transition: 0.2s; 
+        }
+
         .btn-desktop { background-color: #6a5acd; color: white; }
         .btn-desktop:hover { background-color: #7b68ee; }
         
         .btn-web { background-color: #2b2b2b; color: #4cd964; border: 1px solid #4cd964; }
         .btn-web:hover { background-color: #333; }
         
-        .btn-copy { background-color: #333; color: #ddd; }
+        .btn-copy { background-color: #333; color: #ddd; cursor: pointer; border: none; width: 100%; }
         .btn-copy:hover { background-color: #444; }
 
         .footer { margin-top: 25px; font-size: 11px; text-align: center; color: #555; line-height: 1.5; }
@@ -41,7 +43,7 @@
         
         <div class="section">
             <label>Subtitle Language</label>
-            <select id="realLang">
+            <select id="realLang" onchange="updateLinks()">
                 <option value="eng">English</option>
                 <option value="spa">Spanish</option>
                 <option value="fre">French</option>
@@ -50,55 +52,64 @@
             </select>
 
             <label>Auto-Play Spoof (Matches Stremio Default)</label>
-            <select id="spoofLang">
+            <select id="spoofLang" onchange="updateLinks()">
                 <option value="mri">Maori (Recommended)</option>
                 <option value="kal">Greenlandic</option>
             </select>
         </div>
 
         <div class="btn-group">
-            <div class="row">
-                <button class="btn-desktop" onclick="installDesktop()">Install (App)</button>
-                <button class="btn-web" onclick="installWeb()">Install (Web)</button>
-            </div>
+            <a id="linkDesktop" href="#" class="btn btn-desktop">Install (App)</a>
+            <a id="linkWeb" href="#" class="btn btn-web" target="_blank">Install (Web)</a>
+            
             <button class="btn-copy" onclick="copyLink()">Copy Link</button>
         </div>
 
         <div class="footer">
-            Powered by <b>OpenSubtitles v3</b> & <b>SubDL</b><br>
+            Powered by <b>OpenSubtitles v3</b><br>
             Open Source on <a href="https://github.com/notmudge/stremio-autosub" target="_blank">GitHub</a><br>
             Created by notmudge
         </div>
     </div>
 
     <script>
-        function getManifestUrl(protocol) {
+        function generateLink(type) {
             const real = document.getElementById('realLang').value;
             const spoof = document.getElementById('spoofLang').value;
+            const host = window.location.host;
             
-            // Hidden Sources
-            const sources = [
-                "https://opensubtitles-v3.strem.io"
-            ].map(encodeURIComponent);
+            // Hardcoded Source
+            const source = encodeURIComponent("https://opensubtitles-v3.strem.io");
+            const config = `${real}|${spoof}|${source}`;
             
-            const configString = `${real}|${spoof}|${sources.join('|')}`;
-            return `${protocol}://${window.location.host}/${configString}/manifest.json`;
+            // 1. Base Manifest URL (HTTPS is safer for Web)
+            const manifestHttp = `https://${host}/${config}/manifest.json`;
+            
+            // 2. Return based on type
+            if (type === 'desktop') {
+                // Stremio Protocol (stremio://)
+                // We remove https:// and replace with stremio://
+                return `stremio://${host}/${config}/manifest.json`;
+            } else if (type === 'web') {
+                // Stremio Web Link
+                return `https://web.stremio.com/#/addon/${encodeURIComponent(manifestHttp)}`;
+            } else {
+                // Copy Link (Standard HTTPS)
+                return manifestHttp;
+            }
         }
 
-        function installDesktop() { 
-            // Attempts to open Stremio Desktop App
-            window.location.href = getManifestUrl('stremio'); 
-        }
-
-        function installWeb() {
-            // Redirects to Stremio Web Player with the addon pre-loaded
-            const manifest = getManifestUrl('https');
-            window.location.href = `https://web.stremio.com/#/addon/${encodeURIComponent(manifest)}`;
+        function updateLinks() {
+            document.getElementById('linkDesktop').href = generateLink('desktop');
+            document.getElementById('linkWeb').href = generateLink('web');
         }
 
         function copyLink() {
-            navigator.clipboard.writeText(getManifestUrl('https')).then(() => alert("Copied to clipboard!"));
+            navigator.clipboard.writeText(generateLink('copy')).then(() => alert("Copied to clipboard!"));
         }
+
+        // Initialize on load
+        updateLinks();
     </script>
 </body>
 </html>
