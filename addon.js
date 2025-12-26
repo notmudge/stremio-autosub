@@ -7,11 +7,19 @@ app.use(cors());
 
 const PORT = process.env.PORT || 7000;
 
-// STRICT MATCHING TAGS
+// 1. VIDEO TYPES (For Sync Check)
 const TYPES = {
     bluray: ['bluray', 'brrip', 'bdrip'],
     web: ['web-dl', 'webrip', 'web', 'hdrip'],
 };
+
+// 2. RELEASE GROUPS (The "Magic" Sync Fixer)
+// If the filename matches the subtitle's release group, it's usually perfect.
+const GROUPS = [
+    'rarbg', 'yify', 'yts', 'galaxyrg', 'sparks', 'geckos', 'amiable', 
+    'cinefile', 'drones', 'replies', 'demands', 'meen', 'fleet', 'msd',
+    'x264', 'x265', '10bit', '60fps'
+];
 
 app.get('/', (req, res) => {
     res.sendFile(__dirname + '/configure.html');
@@ -35,10 +43,10 @@ app.get(/^\/(.+)\/manifest.json$/, (req, res) => {
     const { realLang } = parseConfig(configStr);
 
     res.json({
-        id: `org.community.autosub.top3.${realLang}`,
-        version: '4.5.0',
-        name: `Auto-Sub (Top 3)`,
-        description: `Auto-plays the best match. Shows 2 backups. Strict Sync.`,
+        id: `org.community.autosub.groups.${realLang}`,
+        version: '4.6.0',
+        name: `Auto-Sub (Smart Group)`,
+        description: `Prioritizes Release Groups (YIFY, RARBG) and Hash matches. Top 3 Results.`,
         resources: ['subtitles'],
         types: ['movie', 'series'],
         catalogs: [],
@@ -70,7 +78,6 @@ app.get(/^\/(.+)\/subtitles\/([^/]+)\/([^/]+)(?:\/([^/]+))?\.json$/, async (req,
     console.log(`[${id}] File: ${videoFilename || "Unknown"} | Hash: ${!!videoHash}`);
 
     try {
-        // 2. Parallel Fetch
         const fetchPromises = sources.map(async (baseUrl) => {
             if (!baseUrl.startsWith('http')) return { source: baseUrl, subs: [] };
             try {
@@ -87,17 +94,16 @@ app.get(/^\/(.+)\/subtitles\/([^/]+)\/([^/]+)(?:\/([^/]+))?\.json$/, async (req,
         let allSubs = [];
         results.forEach(res => {
             if (res.subs.length > 0) {
-                res.subs.forEach(s => {
-                    allSubs.push({ ...s, _origin: "OS" });
+                // We keep the ORIGINAL INDEX from OpenSubtitles because that implies "Popularity"
+                res.subs.forEach((s, idx) => {
+                    allSubs.push({ ...s, _originIndex: idx, _source: "OS" });
                 });
             }
         });
 
-        // 3. IDENTIFY VIDEO TYPE
         let isBluRay = TYPES.bluray.some(t => videoFilename.includes(t));
         let isWeb = TYPES.web.some(t => videoFilename.includes(t));
 
-        // 4. FILTER & SCORE
         let processedSubs = [];
         const seenUrls = new Set(); 
 
@@ -106,53 +112,60 @@ app.get(/^\/(.+)\/subtitles\/([^/]+)\/([^/]+)(?:\/([^/]+))?\.json$/, async (req,
             seenUrls.add(sub.url);
 
             if (sub.lang && (sub.lang.startsWith(realLang) || (realLang === 'eng' && sub.lang === 'en'))) {
-                let score = 0;
+                
+                // STARTING SCORE based on Popularity (Original Rank)
+                // Rank 0 gets 100pts, Rank 1 gets 99pts... 
+                // This ensures if we have NO other clues, we trust OpenSubtitles' order.
+                let score = 100 - sub._originIndex; 
+                
                 const subText = (sub.id + " " + (sub.url || "")).toLowerCase();
                 const isAI = subText.includes('machine') || subText.includes('translated');
 
-                // A. STRICT TYPE MATCHING
+                // A. RELEASE GROUP MATCH (The "Option 3" Fix)
+                // If video is "Avatar...YIFY.mp4" and sub is "Avatar...YIFY.srt", HUGE BOOST.
+                GROUPS.forEach(group => {
+                    if (videoFilename.includes(group) && subText.includes(group)) {
+                        score += 80; // Strong sync indicator
+                    }
+                });
+
+                // B. STRICT TYPE MATCHING
                 if (isBluRay) {
                     if (TYPES.bluray.some(t => subText.includes(t))) score += 50; 
-                    else if (TYPES.web.some(t => subText.includes(t))) score -= 100;
+                    else if (TYPES.web.some(t => subText.includes(t))) score -= 50; // Penalty
                 } else if (isWeb) {
                     if (TYPES.web.some(t => subText.includes(t))) score += 50; 
-                    else if (TYPES.bluray.some(t => subText.includes(t))) score -= 100; 
+                    else if (TYPES.bluray.some(t => subText.includes(t))) score -= 50; 
                 }
 
-                // B. Hash Match (Priority)
-                if (videoHash) score += 200;
+                // C. Hash Match (Gold Standard)
+                if (videoHash && sub._source === 'OS' && sub._originIndex === 0) {
+                     // Usually OS returns hash matches at index 0 when querying by hash
+                     score += 500;
+                }
 
-                // C. FPS Check
-                if (videoFilename.includes('23.976') && subText.includes('23.976')) score += 20;
+                // D. FPS Check
+                if (videoFilename.includes('23.976') && subText.includes('23.976')) score += 30;
 
-                // D. AI Logic
-                if (isAI) score -= 10;
+                // E. AI Penalty
+                if (isAI) score -= 20;
 
                 processedSubs.push({ ...sub, _score: score });
             }
         });
 
-        // 5. Sort (Highest Score First)
+        // SORT (Highest Score First)
         processedSubs.sort((a, b) => b._score - a._score);
 
-        // 6. RETURN TOP 3 SURVIVORS
+        // RETURN TOP 3
         const finalSubs = processedSubs.slice(0, 3).map((sub, index) => {
-            // Index 0 = "mri" (Auto Play)
-            // Index 1 = "mri 2" (Backup)
-            // Index 2 = "mri 3" (Backup)
-            
             let langLabel = spoofLang;
-            if (index > 0) {
-                // We add a number so user can distinguish them in the list
-                // Note: Stremio might group them if lang code is identical, so we try to differentiate ID
-                langLabel = `${spoofLang} ${index + 1}`; 
-            }
+            if (index > 0) langLabel = `${spoofLang} ${index + 1}`; 
 
             return {
                 ...sub,
                 id: `best_${index}_${sub.id}`, 
-                lang: spoofLang, // Keep code same for grouping, or vary it if you want distinct rows
-                // We will rely on Stremio order. Best score is first.
+                lang: spoofLang
             };
         });
 
